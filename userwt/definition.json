@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "id": "userwt",
+  "name": "TOPO",
+  "parameters": [
+    {
+      "id": "cycle",
+      "label": "Cycle",
+      "default": 1,
+      "mapping": {
+        "kind": "enum",
+        "labels": [
+          "256",
+          "512",
+          "1024",
+          "2048"
+        ]
+      },
+      "display": "enum"
+    },
+    {
+      "id": "position",
+      "label": "Position",
+      "default": 0,
+      "mapping": {
+        "kind": "linear",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "display": "percent"
+    },
+    {
+      "id": "warp",
+      "label": "Warp",
+      "default": 0,
+      "mapping": {
+        "kind": "linear",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "display": "percent"
+    },
+    {
+      "id": "drift",
+      "label": "Drift",
+      "default": 0,
+      "mapping": {
+        "kind": "linear",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "display": "percent"
+    }
+  ],
+  "presets": {},
+  "resources": {
+    "voiceCapacity": 27,
+    "display": {
+      "stateBytes": 2152,
+      "stateAlignment": 4,
+      "paths": 0,
+      "points": 0,
+      "nodes": 33,
+      "texts": 1,
+      "palette": 4
+    }
+  }
+}

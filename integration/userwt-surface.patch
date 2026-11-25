@@ -1,0 +1,200 @@
+diff --git a/sdk/include/opxy/wavetable_surface.hpp b/sdk/include/opxy/wavetable_surface.hpp
+new file mode 100644
+index 00000000..c21106d1
+--- /dev/null
++++ b/sdk/include/opxy/wavetable_surface.hpp
+@@ -0,0 +1,22 @@
++#pragma once
++#include <opxy/types.hpp>
++
++namespace opxy { namespace draw {
++const u32 surface_rows = 32, surface_intervals = 32;
++struct TableSurface {
++    u32 rows;
++    i16 heights[surface_rows][surface_intervals + 1];
++};
++// The bank's first cycle is at the near left, its last at the far right.
++inline u32 surface_cycle(u32 row, u32 rows, u32 cycles) {
++    return rows == 1 ? 0 : (row * (cycles - 1) + (rows - 1) / 2) / (rows - 1);
++}
++struct SurfacePoint { i32 x, y; };
++inline SurfacePoint surface_point(const i16* heights, u32 i) {
++    const bool floor = i > surface_intervals;
++    const i32 col = floor ? (i == surface_intervals + 1 ? surface_intervals : 0) : i;
++    return {col * 9 * 1024, (floor ? 32 * 1024 : -i32(heights[col]) * 29 / 32) - col * 384};
++}
++}}
++extern "C" bool opxy_userwt_surface(opxy::u32 track, opxy::u32 bits, opxy::u32 warp,
++                                    opxy::draw::TableSurface* out);
+diff --git a/sdk/platform/opxy-1.2.1/sample_overview.cpp b/sdk/platform/opxy-1.2.1/sample_overview.cpp
+index 5627a25b..efc0841d 100644
+--- a/sdk/platform/opxy-1.2.1/sample_overview.cpp
++++ b/sdk/platform/opxy-1.2.1/sample_overview.cpp
+@@ -9,6 +9,7 @@
+ #include "barrier.hpp"
+ #include "stock.hpp"
+ #include "stock_sample.hpp"
++#include "wavetable_surface_cache.hpp"
+ 
+ extern "C" {
+ opxy::u32 sdk_sample_cache_stock_hash(const char*) __asm__("sdk_sample_cache_stock_hash");
+@@ -36,6 +37,7 @@ struct Entry {
+     const void* data;
+ };
+ Entry entries[kTracksOverviewed];
++SurfaceCache surface_cache;
+ 
+ opxy::draw::SampleOverview overview;
+ u32 shown_key;   // the key the GUI's copy is of
+@@ -171,6 +173,7 @@ void sdk_sample_overview_prepare() {
+             const bool same = entry.key == key && entry.owner == object && entry.data == view.data &&
+                               entry.frames == view.frames && entry.rate == view.rate && entry.channels == view.channels;
+             if (!same) read(entry, key, object, view);
++            surface_cache.prepare(track, key, entry.generation, view);
+         } else if (entry.owner) {
+             withdraw(entry);
+         }
+@@ -183,3 +186,14 @@ void sdk_sample_overview_release(const void* object) {
+     for (u32 track = 0; track < kTracksOverviewed; ++track)
+         if (entries[track].owner == object) withdraw(entries[track]);
+ }
++
++extern "C" bool opxy_userwt_surface(u32 track, u32 bits, u32 warp, opxy::draw::TableSurface* out) {
++    if (!out || track >= kTracksOverviewed || bits < 8 || bits > 11 || warp > 32767 ||
++        !shown_key || !overview.loaded || overview.end <= overview.begin || overview.end > overview.frames)
++        return false;
++    const u32 count = overview.end - overview.begin;
++    if (count & ((1u << bits) - 1)) return false;
++    if (surface_cache.want(track, shown_key, overview.generation, overview.begin, count,
++                           bits, warp, overview.reverse != 0)) sdk_sample_overview_wake();
++    return surface_cache.copy(*out);
++}
+diff --git a/sdk/platform/opxy-1.2.1/screen_drawing.hpp b/sdk/platform/opxy-1.2.1/screen_drawing.hpp
+index 5318eb7c..a427f750 100644
+--- a/sdk/platform/opxy-1.2.1/screen_drawing.hpp
++++ b/sdk/platform/opxy-1.2.1/screen_drawing.hpp
+@@ -4,6 +4,7 @@
+ // frame shape.
+ #pragma once
+ #include "retained_drawing.hpp"
++#include <opxy/wavetable_surface.hpp>
+ #include "screen_header.hpp"
+ #include "note_activity.hpp"
+ #include "amp_envelope.hpp"
+@@ -56,6 +57,29 @@ u32 display_note_serial(const Controls& controls) {
+     return s.serial;
+ }
+ 
++// A table screen opts in by returning newly published geometry. Its nodes
++// belong to the SVG object and are redrawn through the normal screen pass.
++template<class S, class O> auto apply_table_surface(const S& state, O* o, int)
++    -> decltype(changed_table_surface(state), void()) {
++    const draw::TableSurface* table = changed_table_surface(state);
++    if (!table) return;
++    const u32 points = draw::surface_intervals + 3;
++    using Outline = RetainedDrawing<draw::Frame<1, points, 1, 0, 1>>;
++    for (u32 row = 0; row < table->rows; ++row) {
++        PathNode* node = o->nodes[row];
++        const u32 address = Outline::geometry(node);
++        if (!address) continue;
++        Command* commands = reinterpret_cast<Command*>(address);
++        for (u32 i = 0; i < points; ++i) {
++            const draw::SurfacePoint pt = draw::surface_point(table->heights[row], i);
++            commands[i].x = pt.x;
++            commands[i].y = pt.y;
++        }
++        invalidate(node);
++    }
++}
++template<class S, class O> void apply_table_surface(const S&, O*, ...) {}
++
+ // Machine: ids[] names the artwork's nodes (the first are the mutable paths),
+ // then its text slots, then its palette entries.
+ template <class Machine> struct Drawing {
+@@ -112,6 +136,7 @@ template <class Machine> struct Drawing {
+         binding::display_render(&display_state, &display_input, &display_frame);
+         if (!binding::display_valid(&display_frame)) return;
+         Renderer::apply(o,display_frame);
++        apply_table_surface(display_state, o, 0);
+         // Keep the drum Shift page blank; other screens share header overrides.
+         if (!controls.choosing) apply_header(&o->base, display_frame);
+     }
+diff --git a/sdk/platform/opxy-1.2.1/wavetable_surface_cache.hpp b/sdk/platform/opxy-1.2.1/wavetable_surface_cache.hpp
+new file mode 100644
+index 00000000..cc840954
+--- /dev/null
++++ b/sdk/platform/opxy-1.2.1/wavetable_surface_cache.hpp
+@@ -0,0 +1,73 @@
++#pragma once
++#include <opxy/wavetable_surface.hpp>
++#include <opxy/sample.hpp>
++#include "barrier.hpp"
++
++namespace opxy { namespace platform {
++struct SurfaceCache {
++    volatile u32 request, completed, publishing;
++    volatile u32 track, key, generation, first, frames, bits, warp, reverse;
++    volatile i16 heights[draw::surface_rows][draw::surface_intervals + 1];
++    volatile u32 rows;
++
++    bool want(u32 t, u32 k, u32 g, u32 begin, u32 length, u32 b, u32 bend, bool rev) {
++        if (request && track == t && key == k && generation == g && first == begin &&
++            frames == length && bits == b && warp == bend && reverse == u32(rev)) return false;
++        ++request;
++        barrier();
++        track = t; key = k; generation = g; first = begin; frames = length;
++        bits = b; warp = bend; reverse = rev;
++        barrier();
++        if (!++request) request = 2;
++        barrier();
++        return true;
++    }
++    void prepare(u32 t, u32 k, u32 g, const SampleView& view) {
++        const u32 ticket = request;
++        barrier();
++        if (!ticket || (ticket & 1) || completed == ticket || track != t || key != k || generation != g) return;
++        const u32 start = first, count = frames, b = bits, bend = warp, rev = reverse;
++        barrier();
++        if (request != ticket || !view.data || (view.channels != 1 && view.channels != 2) ||
++            b < 8 || b > 11 || bend > 32767 || start > view.frames || count > view.frames - start ||
++            start + count > 0xffffffffu / view.channels) return;
++        const u32 width = 1u << b, mask = width - 1, cycles = count >> b;
++        if (!cycles || (count & mask)) return;
++        const u32 n = cycles < draw::surface_rows ? cycles : draw::surface_rows;
++        ++publishing;
++        barrier();
++        for (u32 row = 0; row < n; ++row) {
++            const u32 index = draw::surface_cycle(row, n, cycles);
++            const i16* pcm = view.data + (start + index * width) * view.channels;
++            for (u32 col = 0; col < draw::surface_intervals; ++col) {
++                u32 phase = col << 27;
++                if (rev) phase = 0u - phase;
++                phase += ((phase < 0x80000000u ? phase : 0u - phase) >> 16) * bend;
++                const u32 x = phase >> (32 - b), frac = (phase >> (17 - b)) & 32767;
++                const i32 a = pcm[x * view.channels], z = pcm[((x + 1) & mask) * view.channels];
++                heights[row][col] = i16(a + ((z - a) * i32(frac) >> 15));
++            }
++            heights[row][draw::surface_intervals] = heights[row][0];
++        }
++        rows = n;
++        barrier();
++        completed = ticket;
++        barrier();
++        ++publishing;
++    }
++    bool copy(draw::TableSurface& dest) const {
++        const u32 version = publishing;
++        barrier();
++        if ((version & 1) || !request || completed != request) return false;
++        const u32 n = rows;
++        if (!n || n > draw::surface_rows) return false;
++        for (u32 row = 0; row < n; ++row)
++            for (u32 col = 0; col <= draw::surface_intervals; ++col)
++                dest.heights[row][col] = heights[row][col];
++        barrier();
++        if (publishing != version || completed != request) return false;
++        dest.rows = n;
++        return true;
++    }
++};
++}}

@@ -1,0 +1,29 @@
+name: TOPO host checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: etcetc000/open-xy
+          ref: ca122f4062f08f13a3023904620a4c35ff9b4a45
+          path: build/open-xy
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify the release and prepare the pinned SDK
+        run: |
+          python3 tools/package_manager.py --check
+          python3 tools/prepare_sdk.py build/open-xy
+      - name: Test machine, display and browser audition
+        run: |
+          python3 build/open-xy/sdk.py test --machine userwt --no-cpu
+          python3 tests/offline.py build/open-xy
+          python3 tests/selector.py build/open-xy

@@ -1,0 +1,35 @@
+{
+  "engine": {
+    "params": [
+      32767,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "volume": 16384
+  },
+  "platform": "OP-XY",
+  "regions": [
+    {
+      "sample": "content/samples/userwt/glass.wav",
+      "framecount": 16384,
+      "sample.start": 0,
+      "sample.end": 16384,
+      "pitch.keycenter": 60,
+      "hikey": 127,
+      "gain": 0,
+      "tune": 0,
+      "reverse": false,
+      "loop.start": 0,
+      "loop.end": 16384,
+      "loop.crossfade": 0,
+      "loop.onrelease": false
+    }
+  ],
+  "type": "userwt",
+  "version": 4
+}

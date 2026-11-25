@@ -1,0 +1,1 @@
+Glass and Reed are original, mathematically generated eight-cycle tables. Each evolves from a sine toward a blend with the third or second harmonic. Both WAVs are dedicated to the public domain under CC0 1.0.

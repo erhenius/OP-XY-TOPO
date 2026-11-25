@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "userwt",
+  "name": "TOPO",
+  "machine": "userwt",
+  "mode": "combined",
+  "sdkCommit": "ca122f4062f08f13a3023904620a4c35ff9b4a45",
+  "patches": [
+    {
+      "path": "integration/userwt-surface.patch",
+      "sha256": "db09fae65cacd55a51cea7e5f216b9934398cf7255bf37272a45fd1021ad3379"
+    },
+    {
+      "path": "integration/userwt-selector.patch",
+      "sha256": "7b2639a854d9e8c0c968ccda799aaa6ad55f297dcc6b3b1539e06930f39ae437"
+    },
+    {
+      "path": "integration/target-runtime.patch",
+      "sha256": "602f048bc12f9ed026dbc94294455381a68b0ab0ed096d6a226bab9ff99de536"
+    }
+  ],
+  "claims": [],
+  "repository": "https://github.com/erhenius/OP-XY-TOPO"
+}

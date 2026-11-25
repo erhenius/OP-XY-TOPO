@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "sdk": "1.17",
+  "kind": "sample",
+  "base": "sampler",
+  "description": "Chromatic wavetable oscillator reading user-selected sample files.",
+  "samples": "samples",
+  "presets": "presets"
+}

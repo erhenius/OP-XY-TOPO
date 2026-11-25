@@ -1,0 +1,306 @@
+diff --git a/builder/core.mjs b/builder/core.mjs
+index 739cb31..eef1d9c 100644
+--- a/builder/core.mjs
++++ b/builder/core.mjs
+@@ -10,7 +10,7 @@ export const selectArtwork = Graphics.selectArtwork;
+ // The init preset's authored settings, shared with tooling.adapters.default_preset
+ // (write_builder inlines this same file's content for the offline export).
+ import DEFAULT_PRESET_TEMPLATE from '../tooling/default_preset.json' with { type: 'json' };
+-export const PROFILE_SHA256 = '6bd2a299b7490b01657119315361974ea317c80bcac99c088525b08ff3303181';
++export const PROFILE_SHA256 = '8f762097cafe1ace8ffcc5d113cef40f2baae6eb98e4649589be270f29339780';
+ export function requireThat(ok, message) { if (!ok) throw new Error(message); }
+ const check = requireThat;
+ const utf8 = new TextEncoder();
+diff --git a/profiles/opxy-1.2.1.json b/profiles/opxy-1.2.1.json
+index b6c1de4..3c6a10d 100644
+--- a/profiles/opxy-1.2.1.json
++++ b/profiles/opxy-1.2.1.json
+@@ -125,6 +125,9 @@
+   },
+   "screen_template_sha256": "d71b110ac905c1bcfcecc9ad94237aa72fe12c531e651f170bb5a1042547fb16",
+   "services": {
++    "userwt_selector": [
++      "userwtSelector"
++    ],
+     "samples": [
+       "sample",
+       "drum",
+@@ -580,6 +583,46 @@
+       "service": "samples",
+       "call": true
+     },
++    {
++      "kind": "hook",
++      "address": "0x8d4d8a2e",
++      "file_offset": "0x10fc8a",
++      "length": 8,
++      "before": "00dea011c00e0000",
++      "symbol": "sdk_userwt_preview_send",
++      "service": "userwt_selector",
++      "call": true
++    },
++    {
++      "kind": "hook",
++      "address": "0x8d5b199c",
++      "file_offset": "0x1e8bf4",
++      "length": 4,
++      "before": "f9e30e35",
++      "symbol": "sdk_userwt_preview_receive",
++      "service": "userwt_selector",
++      "call": true
++    },
++    {
++      "kind": "hook",
++      "address": "0x8d50c796",
++      "file_offset": "0x1439f2",
++      "length": 4,
++      "before": "ffe3edea",
++      "symbol": "sdk_userwt_preview_acquire",
++      "service": "userwt_selector",
++      "call": true
++    },
++    {
++      "kind": "hook",
++      "address": "0x8d512202",
++      "file_offset": "0x14945e",
++      "length": 4,
++      "before": "ffe3d5d2",
++      "symbol": "sdk_userwt_preview_mix",
++      "service": "userwt_selector",
++      "call": true
++    },
+     {
+       "kind": "hook",
+       "address": "0x8d50bc58",
+diff --git a/sdk/include/opxy/userwt_cycle.hpp b/sdk/include/opxy/userwt_cycle.hpp
+new file mode 100644
+index 0000000..a53b37b
+--- /dev/null
++++ b/sdk/include/opxy/userwt_cycle.hpp
+@@ -0,0 +1,11 @@
++#pragma once
++#include <opxy/types.hpp>
++
++namespace userwt {
++inline opxy::u32 width_bits(opxy::i32 control) {
++    return 8u + (control > 0 ? opxy::u32(control) >> 29 : 0u);
++}
++inline bool usable(opxy::u32 frames, opxy::u32 bits) {
++    return frames >= (1u << bits) && (frames & ((1u << bits) - 1u)) == 0;
++}
++}
+diff --git a/sdk/platform/opxy-1.2.1/userwt_selector.cpp b/sdk/platform/opxy-1.2.1/userwt_selector.cpp
+new file mode 100644
+index 0000000..aa1022f
+--- /dev/null
++++ b/sdk/platform/opxy-1.2.1/userwt_selector.cpp
+@@ -0,0 +1,149 @@
++// Single User Wavetable browser preview on stock 1.2.1. The stock mixer owns
++// its cache reference, replacement, fade, gain, stereo sum and release by key.
++// Only its private preview object's PCM source and read position are adapted.
++#include <opxy/audio.hpp>
++#include <opxy/userwt_cycle.hpp>
++#include "stock.hpp"
++#include "stock_sample.hpp"
++#include "barrier.hpp"
++
++using namespace opxy;
++using namespace opxy::platform;
++extern "C" {
++extern const char userwt_engine_id[] __asm__("userwt_engine_id");
++int userwt_ready() __asm__("userwt_ready");
++u32 sdk_userwt_preview_send(u32,u32,const u8*,u32,u32,u32,u32) __asm__("sdk_userwt_preview_send");
++void sdk_userwt_preview_receive(const u8*,u32) __asm__("sdk_userwt_preview_receive");
++const void* sdk_userwt_preview_acquire(u32,u32) __asm__("sdk_userwt_preview_acquire");
++void sdk_userwt_preview_mix(void*,i32*) __asm__("sdk_userwt_preview_mix");
++}
++
++namespace {
++struct Vector { u32 reserved; const i32* begin; const i32* end; };
++struct __attribute__((may_alias)) Player { const void* object; u32 key, position; };
++static_assert(sizeof(void*) != 4 || __builtin_offsetof(Player,position) == 8, "Stock preview cursor");
++struct Window {
++    u32 occupied, unused;
++    const i16* data;
++    u8 padding[0x30 - 8 - sizeof(data)];
++    u32 frames, spare, rate;
++    u8 stereo;
++};
++static_assert(__builtin_offsetof(Window,data) == 8 && __builtin_offsetof(Window,frames) == 0x30 &&
++              __builtin_offsetof(Window,stereo) == 0x3c, "Stock preview sample view");
++const u32 duration = 22050, c4_step = 25480119;
++// Only the IPC receiver writes the inbox. The mixer consumes a consistent
++// snapshot once per block. The sample object and its PCM never cross roles.
++struct Inbox { volatile u32 version, opcode, key, bits; };
++Inbox inbox;
++volatile u32 seen;  // audio's acknowledgement of the receiver's latest request
++bool private_request;  // IPC receiver only
++u32 pending_key, pending_bits, active_bits, elapsed;
++SampleView source;
++Window window;
++i16 samples[block_frames];
++
++void post(u32 opcode, u32 key, u32 bits) {
++    ++inbox.version;
++    barrier();
++    inbox.opcode = opcode;
++    inbox.key = key;
++    inbox.bits = bits;
++    barrier();
++    ++inbox.version;
++}
++
++void consume(Player* player) {
++    const u32 version = inbox.version;
++    if (version == seen || (version & 1)) return;
++    barrier();
++    const u32 opcode = inbox.opcode, key = inbox.key, bits = inbox.bits;
++    barrier();
++    if (version != inbox.version) return;
++    pending_key = key;
++    pending_bits = bits;
++    if (opcode == 14) stock<void(void*,u32)>(0x8d50c73e)(player,key);
++    else stock<void(void*)>(0x8d50c72c)(player);
++    barrier();
++    seen = version;
++}
++
++// Use the actual number stock consumed. Stock may stop before a full block.
++// A zero-length window causes its normal end-of-sample and cache release.
++void fill(u32 consumed) {
++    if (consumed > window.frames) consumed = window.frames;
++    elapsed += consumed;
++    const u32 remaining = duration - elapsed;
++    window.frames = remaining < block_frames ? remaining : block_frames;
++    if (!window.frames) return;
++    const u32 bits = active_bits, mask = (1u << bits) - 1;
++    u32 phase = elapsed * c4_step;
++    for (u32 i = 0; i < window.frames; ++i, phase += c4_step) {
++        const u32 index = phase >> (32 - bits);
++        const i32 fraction = i32((phase >> (24 - bits)) & 255);
++        const i32 a = source.data[index * source.channels];
++        const i32 b = source.data[((index + 1) & mask) * source.channels];
++        const i32 pcm = a + (((b - a) * fraction) >> 8);
++        const u32 tail = remaining - i - 1;
++        samples[i] = i16(tail < 256 ? (pcm * i32(tail)) >> 8 : pcm);
++    }
++}
++}
++
++u32 sdk_userwt_preview_send(u32 bus,u32 topic,const u8* msg,u32 size,u32 options,u32 from,u32 to) {
++    const auto send = stock<u32(u32,u32,const u8*,u32,u32,u32,u32)>(0x11a00ec0);
++    const u32 track = byte(kSelectedTrack);
++    if (size != 5 || !msg || msg[0] != 14 || word(kScreen) != kSampleBrowserScreen ||
++        track >= kTracks || track_engine(track) != u32(reinterpret_cast<Address>(userwt_engine_id)) ||
++        userwt_ready() != 1)
++        return send(bus,topic,msg,size,options,from,to);
++    const Vector* v = stock<const Vector*(u32)>(0x8d4d72a8)(track);
++    if (!v || !v->begin || reinterpret_cast<Address>(v->begin) % 4 ||
++        reinterpret_cast<Address>(v->end) <= reinterpret_cast<Address>(v->begin))
++        return send(bus,topic,msg,size,options,from,to);
++    // The same copying transport that stock calls with its stack-local payload.
++    const u8 tagged[8] = {14,msg[1],msg[2],msg[3],msg[4],'W','T',u8(userwt::width_bits(v->begin[0]))};
++    return send(bus,topic,tagged,sizeof(tagged),options,from,to);
++}
++
++void sdk_userwt_preview_receive(const u8* msg,u32 size) {
++    const bool tagged = size == 8 && msg && msg[0] == 14 && msg[5] == 'W' &&
++                        msg[6] == 'T' && msg[7] >= 8 && msg[7] <= 11;
++    const bool plain = size == 5 && msg && msg[0] == 14;
++    const bool stop = size == 1 && msg && msg[0] == 15;
++    // Stock-only sessions keep their original dispatch and timing. Queue the
++    // handoff when crossing from a private audition or replacing a pending one.
++    if (!tagged && (!(plain || stop) || (!private_request && seen == inbox.version))) {
++        stock<void(const u8*,u32)>(0x8d4d83b8)(msg,size);
++        return;
++    }
++    private_request = tagged;
++    const u32 key = stop ? 0 : u32(msg[1]) | u32(msg[2]) << 8 | u32(msg[3]) << 16 | u32(msg[4]) << 24;
++    post(msg[0],key,tagged ? msg[7] : 0);
++}
++
++const void* sdk_userwt_preview_acquire(u32 manager,u32 key) {
++    const void* original = stock<const void*(u32,u32)>(0x8d509d70)(manager,key);
++    if (!original || !pending_bits || key != pending_key) return original;
++    source = stock_sample_view(original);
++    active_bits = pending_bits;
++    elapsed = 0;
++    window.occupied = 1;
++    window.data = samples;
++    window.rate = 44100;
++    window.stereo = 0;
++    window.frames = 0;
++    if (!source.data || !userwt::usable(source.frames, active_bits)) elapsed = duration;
++    fill(0);
++    return &window;
++}
++
++void sdk_userwt_preview_mix(void* state,i32* mix) {
++    Player* player = static_cast<Player*>(state);
++    consume(player);
++    if (player->object == &window && player->position) {
++        fill(player->position);
++        player->position = 0;
++    }
++    stock<void(void*,i32*)>(0x8d50c7ac)(state,mix);
++}
+diff --git a/tests/test_pipeline.py b/tests/test_pipeline.py
+index c71ffcc..f61b5a9 100644
+--- a/tests/test_pipeline.py
++++ b/tests/test_pipeline.py
+@@ -107,7 +107,7 @@ class Services(unittest.TestCase):
+         self.assertNotIn('sample_kernel', units)
+         self.assertEqual(steps(machines), [u for u in units if native.UNIT_SERVICES.get(u) not in
+                                           ('control', 'aux', 'players', 'master_filter', 'drum_sends', 'drum_locks',
+-                                           'drumline', 'synth_shift')])
++                                           'drumline', 'synth_shift', 'userwt_selector')])
+         self.assertEqual(active_services(profile, ['drum', 'padMix']), {'samples', 'octaves', 'drums', 'drum_sends', 'drum_locks'})
+         self.assertEqual(active_services(profile, ['drum', 'hidePages', 'padMix']),
+                          {'samples', 'octaves', 'drums', 'drum_sends', 'drum_locks', 'control'})
+@@ -120,12 +120,15 @@ class Services(unittest.TestCase):
+         self.assertNotIn('drumline_page', native.service_users(machines))
+         self.assertIn('drumline_page', native.service_users(paged))
+         self.assertEqual(steps(paged), [u for u in units if native.UNIT_SERVICES.get(u) not in
+-                                        ('control', 'aux', 'players', 'master_filter', 'synth_shift')])
++                                        ('control', 'aux', 'players', 'master_filter', 'synth_shift', 'userwt_selector')])
+         self.assertEqual(native.subset(paged, paged[:1]).extensions, (page,))
+         without = [m for m in machines if m.kind not in ('sample', 'drum')]  # nor any extension
+         self.assertEqual(steps(without), [u for u in units if u not in native.UNIT_SERVICES])
+         self.assertEqual(set(native.object_services(machines).values()), {'samples', 'octaves', 'drums', 'extensions'})
+         self.assertEqual(native.object_services(without), {})
++        sample = next(m for m in machines if m.kind == 'sample')
++        self.assertNotIn('userwt_selector', steps([sample]))
++        self.assertIn('userwt_selector', steps([replace(sample, id='userwt')]))
+ 
+     def test_only_a_service_edit_may_stay_stock(self):
+         profile = copy.deepcopy(config())
+diff --git a/tooling/native.py b/tooling/native.py
+index 08b2ce4..3ca21b2 100644
+--- a/tooling/native.py
++++ b/tooling/native.py
+@@ -269,13 +269,14 @@ SDK_UNITS = ('divide', 'sample_kernel', 'memory', 'registration', 'registration_
+              'players', 'player_hooks', 'player_table', 'keyboard_octaves', 'sample_overview', 'sample_overview_stock',
+              'drum_machines', 'drum_callbacks', 'drum_values_stock', 'drum_synthesis_stock', 'drum_hooks',
+              'drum_send', 'drum_send_hooks', 'drum_locks', 'lock_handles', 'drumline', 'drumline_hooks',
+-             'synth_shift_hooks')
++             'synth_shift_hooks', 'userwt_selector')
+ # SDK units that exist only for a profile service, linked when a machine needs it.
+ UNIT_SERVICES = dict.fromkeys(('sample_machines', 'sample_hooks', 'sample_callbacks', 'sample_cache',
+                                'sample_cache_stock', 'sample_cache_hooks', 'sample_progress',
+                                'sample_progress_stock', 'pad_assignment', 'pad_assignment_stock', 'drum_page',
+                                'drum_controls_stock', 'sample_slice_clock', 'drum_display_stock', 'sample_overview', 'sample_overview_stock'), 'samples')
+ UNIT_SERVICES.update(dict.fromkeys(('players', 'player_hooks', 'player_table'), 'players'))
++UNIT_SERVICES['userwt_selector'] = 'userwt_selector'
+ UNIT_SERVICES['keyboard_octaves'] = 'octaves'
+ # SDK units that patch nothing, each linked only when a machine's own C++ includes
+ # the header it implements (opxy/<header>.hpp); other builds are unchanged.
+@@ -317,7 +318,8 @@ def service_users(machines):
+     settings extensions link none), the capabilities they declare ('master_filter',
+     'drumline_page') and the registry capabilities its extensions declare."""
+     users = [m.kind for m in machines] + (['extension'] if linked_extensions(machines) else [])
+-    return (users + ['trackControl' for m in machines if track_control(m)] +
++    return (users + ['userwtSelector' for m in machines if m.kind == 'sample' and m.id == 'userwt'] +
++            ['trackControl' for m in machines if track_control(m)] +
+             ['auxTrack' for m in machines if track_control(m) and track_control(m).get('aux')] +
+             ['hidePages' for m in machines if 'hidePages' in m.definition] +
+             ['padMix' for m in machines if pad_mix(m)] +
