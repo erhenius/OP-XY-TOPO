@@ -72,5 +72,14 @@ int main() {
     if (!userwt::changed_table_surface(state) || !draw::valid(frame)) return 10;
     userwt::display_reset(state);
     if (userwt::changed_table_surface(state) || state.ready) return 11;
+    input.slots[0] = 0x7fffffff;
+    input.slots[4] = 2 << 29;
+    input.shown[0] = 4;
+    input.parameters[0] = input.slots[4];
+    userwt::display(state, input, frame);
+    if (frame.header[0][0] != 'S' || state.bits != 11 || state.warp != 0) return 12;
+    input.shown[0] = 0;
+    userwt::display(state, input, frame);
+    if (frame.header[0][0] != '2' || frame.texts[0].chars[0] != 'S') return 13;
     return 0;
 }

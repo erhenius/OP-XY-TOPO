@@ -31,7 +31,7 @@
     },
     {
       "id": "warp",
-      "label": "Warp",
+      "label": "Shape",
       "default": 0,
       "mapping": {
         "kind": "linear",
@@ -50,6 +50,21 @@
         "maximum": 1
       },
       "display": "percent"
+    },
+    {
+      "id": "mode",
+      "label": "Mode",
+      "default": 0,
+      "mapping": {
+        "kind": "enum",
+        "labels": [
+          "Clean",
+          "Splice",
+          "Sync",
+          "Both"
+        ]
+      },
+      "display": "enum"
     }
   ],
   "presets": {},

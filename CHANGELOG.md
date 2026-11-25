@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0 · 2026-11-26
+
+Adds Splice, Sync and Both alongside the original Clean renderer. K3 Shape controls the selected mode. The four original parameter slots and the `userwt` machine identity are retained. Mode is a fifth saved parameter on the sample instrument’s standard alternate page.
+
 ## 0.1.0
 
 First public TOPO release, based on User Wavetable 0.1.0-dev.6.

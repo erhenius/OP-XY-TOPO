@@ -42,6 +42,10 @@ def main(tmp):
          '-I'+str(ROOT/'userwt'), '-I'+str(SDK/'sdk/include'), '-I'+str(SDK/'sdk/platform/opxy-1.2.1'),
          str(ROOT/'tests/surface.cpp'), '-o', str(tmp/'trace')])
     run([str(tmp/'trace')])
+    run(['c++', '-std=c++11', '-O2', '-Wall', '-Werror',
+         '-I'+str(ROOT/'userwt'), '-I'+str(SDK/'sdk/include'),
+         str(ROOT/'tests/modes.cpp'), '-o', str(tmp/'modes')])
+    run([str(tmp/'modes')])
     banks=tmp/'content/samples/userwt'
     last=2**31-1
     endings=[]

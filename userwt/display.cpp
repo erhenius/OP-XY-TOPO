@@ -11,13 +11,15 @@ void display_reset(DisplayState& state) {
 void display(DisplayState& state, const draw::Input& input, Frame& frame) {
     using namespace draw;
     const SampleOverview& sample = *opxy_sample_overview();
-    const u32 bits = width_bits(input.parameters[0]);
+    const u32 bits = width_bits(input.slots[0]);
     const char* const widths[] = {"256", "512", "1024", "2048"};
-    header(frame, 0, widths[bits - 8]);
+    const Mode mode = mode_of(input.slots[4]);
+    const char* const names[] = {"Clean", "Splice", "Sync", "Both"};
+    header(frame, 0, input.shown[0] == 4 ? names[mode] : widths[bits - 8]);
     const bool valid = sample.assigned && sample.loaded && sample.begin < sample.end &&
                        sample.end <= sample.frames && usable(sample.end - sample.begin, bits);
     const u32 position = input.parameters[1] > 0 ? u32(input.parameters[1]) >> 16 : 0;
-    const u32 warp = input.parameters[2] > 0 ? u32(input.parameters[2]) >> 16 : 0;
+    const u32 warp = mode == Clean && input.parameters[2] > 0 ? u32(input.parameters[2]) >> 16 : 0;
     const bool same = valid && state.ready && state.track == input.track &&
                       state.generation == sample.generation && state.begin == sample.begin &&
                       state.end == sample.end && state.bits == bits && state.reverse == sample.reverse;
@@ -47,7 +49,10 @@ void display(DisplayState& state, const draw::Input& input, Frame& frame) {
     }
     const char* message = !sample.assigned ? "Choose a sample" : !sample.loaded ? "Loading" :
                           !valid ? "Check cycle length" : !rows ? "Reading table" : "";
-    text(frame, 0, 40 * unit, 132 * unit, unit, message);
+    if (!*message && mode != Clean)
+        text(frame, 0, 350 * unit, 209 * unit, unit, names[mode]);
+    else
+        text(frame, 0, 40 * unit, 132 * unit, unit, message);
     if (valid) place(frame, surface_rows, (40 + (position * 400 + 16383) / 32767) * unit,
                      32 * unit, unit, 0, keep);
     else hide(frame, surface_rows);
